@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Result};
+use rusqlite::{params, Connection, Result, TransactionBehavior};
 
 pub struct SqliteRepository {
     pub(crate) conn: Connection,
@@ -6,21 +6,62 @@ pub struct SqliteRepository {
 
 impl SqliteRepository {
     pub fn new(path: &str) -> Result<Self> {
-        let conn = Connection::open(path)?;
-        create_table_messages(&conn)?;
-        create_table_config(&conn)?;
-        create_table_sessions(&conn)?;
-        create_table_conversation_branches(&conn)?;
-        create_table_branch_messages(&conn)?;
-        create_table_branch_metadata(&conn)?;
-        migrate_messages_id_column(&conn)?;
-        messages_add_session_id_column(&conn)?;
-        messages_add_role_column(&conn)?;
-        messages_add_type_columns(&conn)?;
-        sessions_add_current_column(&conn)?;
-        sessions_rename_column_key_to_name(&conn)?;
+        let mut conn = Connection::open(path)?;
+        // A second termai holding the write lock used to abort the running
+        // chat outright; wait for it instead. WAL lets a read (a listing, a
+        // shell completion) run while a chat is writing.
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        conn.pragma_update(None, "synchronous", "FULL")?;
+
+        // One process migrates at a time. Two instances starting together
+        // used to both see a column as missing and both ALTER, and the loser
+        // died with "duplicate column name" before the chat even opened.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        migrate(&tx)?;
+        tx.commit()?;
+
         Ok(Self { conn })
     }
+}
+
+fn migrate(conn: &Connection) -> Result<()> {
+    create_table_messages(conn)?;
+    create_table_config(conn)?;
+    create_table_sessions(conn)?;
+    create_table_conversation_branches(conn)?;
+    create_table_branch_messages(conn)?;
+    create_table_branch_metadata(conn)?;
+    migrate_messages_id_column(conn)?;
+    messages_add_session_id_column(conn)?;
+    messages_add_role_column(conn)?;
+    messages_add_type_columns(conn)?;
+    sessions_add_current_column(conn)?;
+    sessions_rename_column_key_to_name(conn)?;
+    sessions_add_last_used_column(conn)?;
+    sessions_enforce_unique_names(conn)?;
+    messages_add_sequence_column(conn)?;
+    create_message_indexes(conn)?;
+    Ok(())
+}
+
+/// `ALTER TABLE ADD COLUMN`, tolerating a column another process added first.
+fn add_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<bool> {
+    if column_exists(conn, table, column)? {
+        return Ok(false);
+    }
+    match conn.execute(
+        &format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, definition),
+        [],
+    ) {
+        Ok(_) => Ok(true),
+        Err(err) if is_duplicate_column(&err) => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
+fn is_duplicate_column(error: &rusqlite::Error) -> bool {
+    error.to_string().contains("duplicate column name")
 }
 
 fn create_table_messages(conn: &Connection) -> Result<()> {
@@ -34,6 +75,82 @@ fn create_table_messages(conn: &Connection) -> Result<()> {
         [],
     )?;
     Ok(())
+}
+
+/// Conversation order used to be implicit in SQLite's rowid, which only held
+/// while every read was a full table scan. `sequence` makes it explicit so
+/// adding an index on `session_id` can never scramble a conversation.
+fn messages_add_sequence_column(conn: &Connection) -> Result<()> {
+    if add_column(conn, "messages", "sequence", "INTEGER NOT NULL DEFAULT 0")? {
+        // Backfill from rowid: for existing rows insertion order *is* rowid order.
+        conn.execute("UPDATE messages SET sequence = rowid", [])?;
+    }
+    Ok(())
+}
+
+fn create_message_indexes(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_session ON messages (session_id, sequence)",
+        [],
+    )?;
+    Ok(())
+}
+
+/// `expires_at` was overloaded as a last-used clock (it is stamped at
+/// now + 24h on every touch) while also being displayed as an expiry the
+/// user could not act on. `last_used_at` records the honest value.
+fn sessions_add_last_used_column(conn: &Connection) -> Result<()> {
+    if add_column(conn, "sessions", "last_used_at", "TEXT")? {
+        // Historic rows: expires_at was always stamped at last-use + 24h.
+        conn.execute(
+            "UPDATE sessions
+             SET last_used_at = datetime(expires_at, '-24 hours')
+             WHERE last_used_at IS NULL",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// Two sessions sharing a name make one of them permanently unreachable:
+/// every lookup goes through `fetch_session_by_name`, which returns the first
+/// row. Suffix any pre-existing collisions, then make it impossible.
+fn sessions_enforce_unique_names(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM sessions WHERE rowid NOT IN
+             (SELECT MIN(rowid) FROM sessions GROUP BY name)",
+    )?;
+    let shadowed: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>>>()?;
+    drop(stmt);
+
+    for (index, id) in shadowed.iter().enumerate() {
+        conn.execute(
+            "UPDATE sessions SET name = name || ?1 WHERE id = ?2",
+            params![format!("-{}", index + 2), id],
+        )?;
+    }
+
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_name ON sessions (name)",
+        [],
+    )?;
+    Ok(())
+}
+
+/// True when `table` has a column called `column`.
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+    let mut found = false;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for name in rows {
+        if name? == column {
+            found = true;
+            break;
+        }
+    }
+    Ok(found)
 }
 
 fn create_table_config(conn: &Connection) -> Result<()> {

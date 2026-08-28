@@ -1,3 +1,4 @@
+#[derive(Debug, Clone)]
 pub struct MessageEntity {
     pub id: String,
     pub session_id: String,

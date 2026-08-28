@@ -18,9 +18,14 @@ pub struct Session {
     pub expires_at: NaiveDateTime,
     pub current: bool,
     pub messages: Vec<Message>,
+    /// Opt-in "never touch the database" mode (`chat --temporary`, and the
+    /// throwaway sessions internal callers build to reuse the chat plumbing).
+    /// It is not the default for interactive chat: a session the user cannot
+    /// find afterwards is indistinguishable from one that was lost.
     pub temporary: bool,
     pub redaction_mapping: Option<HashMap<String, String>>,
     pub smart_context: Option<SessionSmartContext>,
+    pub last_used_at: NaiveDateTime,
 }
 
 impl From<&SessionEntity> for Session {
@@ -34,23 +39,27 @@ impl From<&SessionEntity> for Session {
             temporary: false,
             redaction_mapping: None,
             smart_context: None,
+            last_used_at: value.last_used_at,
         }
     }
 }
 
 impl Session {
+    /// A session that is never written to disk. Used by one-shot internal
+    /// callers (commit message generation, compaction, `ask` without
+    /// `--session`) and by `chat --temporary`.
     pub fn new_temporary() -> Self {
         let now = Utc::now().naive_utc();
-        let expires_at: NaiveDateTime = now + Duration::hours(24);
         Self {
             id: common::unique_id::generate_uuid_v4().to_string(),
             name: "temporary".to_string(),
-            expires_at,
+            expires_at: now + Duration::hours(24),
             current: true,
             messages: Vec::new(),
             temporary: true,
             redaction_mapping: None,
             smart_context: None,
+            last_used_at: now,
         }
     }
 
@@ -64,6 +73,7 @@ impl Session {
             temporary: self.temporary,
             redaction_mapping: self.redaction_mapping.clone(),
             smart_context: self.smart_context.clone(),
+            last_used_at: self.last_used_at,
         }
     }
 

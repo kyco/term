@@ -7,8 +7,10 @@ use crate::path::model::Files;
 use crate::preset::builtin::BuiltinPresets;
 use crate::repository::db::SqliteRepository;
 use crate::session::model::session::Session;
+use crate::session::repository::SessionRepository;
 use crate::session::service::sessions_service;
 use anyhow::Result;
+use chrono::Local;
 use colored::*;
 
 /// Handle the chat command for interactive conversations
@@ -30,86 +32,96 @@ pub async fn handle_chat_command(args: &ChatArgs, repo: &SqliteRepository) -> Re
         Vec::<Files>::new()
     };
 
-    // Get or create session
+    // Get or create session.
+    //
+    // A bare `termai chat` used to build a throwaway session that was never
+    // written to the database: the conversation only existed in memory, and a
+    // dropped connection took all of it. Chats are saved by default now, and
+    // `--temporary` is the opt-in for a conversation you do not want kept.
     let session = if last_session {
-        // Resume the most recent session
         let session = sessions_service::get_most_recent_session(repo, repo)?;
-
-        // Show message when resuming last session
         println!(
             "🔄 {} '{}'",
-            "Resuming last session".bright_green(),
+            "Resuming".bright_green(),
             session.name.bright_cyan()
         );
-        println!();
-
-        // Show previous messages if any
-        if !session.messages.is_empty() {
-            println!("{}", "═".repeat(80).bright_black());
-            println!(
-                "   {} previous messages loaded",
-                session.messages.len().to_string().bright_yellow()
-            );
-            println!("{}", "═".repeat(80).bright_black());
-            println!();
-
-            // Display previous messages
-            for message in &session.messages {
-                let role_display = match message.role.to_string().as_str() {
-                    "user" => "You".bright_blue().bold(),
-                    "assistant" => "AI".bright_magenta().bold(),
-                    "system" => "System".bright_yellow().bold(),
-                    _ => message.role.to_string().white().bold(),
-                };
-
-                println!("{}: {}", role_display, message.content.dimmed());
-                println!();
-            }
-
-            println!("{}", "─".repeat(80).bright_black());
-            println!();
-        }
-
+        replay_recent(&session);
         session
     } else if let Some(name) = session_name {
-        let session = sessions_service::session(repo, repo, name)?;
+        // Warn *before* creating it: a mistyped name used to silently produce
+        // a new empty session, which looks identical to a lost conversation.
+        let suggestions = if repo.fetch_session_by_name(name).is_err() {
+            sessions_service::suggest_similar_sessions(repo, name)
+        } else {
+            Vec::new()
+        };
 
-        // Show previous messages if continuing an existing session
-        if !session.messages.is_empty() {
-            println!("{}", "═".repeat(80).bright_black());
+        let session = sessions_service::session(repo, repo, name)?;
+        if session.messages.is_empty() {
             println!(
-                "📝 {} '{}'",
-                "Continuing session".bright_green(),
+                "🆕 {} '{}'",
+                "New session".bright_green(),
                 name.bright_cyan()
             );
-            println!(
-                "   {} previous messages loaded",
-                session.messages.len().to_string().bright_yellow()
-            );
-            println!("{}", "═".repeat(80).bright_black());
-            println!();
-
-            // Display previous messages
-            for message in &session.messages {
-                let role_display = match message.role.to_string().as_str() {
-                    "user" => "You".bright_blue().bold(),
-                    "assistant" => "AI".bright_magenta().bold(),
-                    "system" => "System".bright_yellow().bold(),
-                    _ => message.role.to_string().white().bold(),
-                };
-
-                println!("{}: {}", role_display, message.content.dimmed());
-                println!();
+            if !suggestions.is_empty() {
+                println!(
+                    "   {} {}",
+                    "Did you mean:".bright_yellow(),
+                    suggestions.join(", ").bright_cyan()
+                );
+                println!(
+                    "   {}",
+                    "Exit and re-run with the right name if so — this one is empty.".dimmed()
+                );
             }
-
-            println!("{}", "─".repeat(80).bright_black());
-            println!();
+        } else {
+            println!(
+                "📝 {} '{}'",
+                "Continuing".bright_green(),
+                name.bright_cyan()
+            );
+            replay_recent(&session);
         }
-
         session
-    } else {
+    } else if args.temporary {
+        println!(
+            "⚠️  {} — nothing from this chat will be saved.",
+            "Temporary chat".bright_yellow()
+        );
+        println!(
+            "   {}",
+            "Use /save <name> at any point to keep it.".dimmed()
+        );
+        println!();
         Session::new_temporary()
+    } else {
+        let name = format!("chat-{}", Local::now().format("%Y%m%d-%H%M%S"));
+        let session = sessions_service::session(repo, repo, &name)?;
+        println!(
+            "💾 {} '{}' {}",
+            "Saving to".bright_green(),
+            session.name.bright_cyan(),
+            "(renamed from your first message)".dimmed()
+        );
+        println!();
+        session
     };
+
+    // Anything typed but never answered — a dropped connection, a closed
+    // terminal — is handed back rather than quietly discarded.
+    let unsent = sessions_service::recover_unsent_messages(repo, &session);
+    if !unsent.is_empty() {
+        println!(
+            "{} {}",
+            "↩".bright_yellow(),
+            format!(
+                "{} message(s) from an interrupted turn were recovered — see /unsent",
+                unsent.len()
+            )
+            .bright_yellow()
+        );
+        println!();
+    }
 
     // Show preset suggestions before starting interactive session
     show_preset_suggestions(
@@ -120,17 +132,60 @@ pub async fn handle_chat_command(args: &ChatArgs, repo: &SqliteRepository) -> Re
 
     // Create interactive session
     let mut interactive_session =
-        InteractiveSession::new(repo, repo, repo, repo, session, context_files)?;
-
-    // If we have initial input, handle it first
-    if let Some(initial_input) = input {
-        println!("🤖 Processing initial input: {}", initial_input);
-        println!();
-        // The interactive session will handle this input
-    }
+        InteractiveSession::new(repo, repo, repo, repo, session, context_files)?
+            .with_initial_input(input.clone());
 
     // Start the interactive session
     interactive_session.run().await
+}
+
+/// Print the tail of a resumed conversation.
+///
+/// Dumping every stored message meant a long session buried the prompt under
+/// hundreds of lines before the user could type anything.
+fn replay_recent(session: &Session) {
+    const SHOWN: usize = 6;
+
+    if session.messages.is_empty() {
+        return;
+    }
+
+    let total = session.messages.len();
+    let skipped = total.saturating_sub(SHOWN);
+    println!(
+        "   {} {}",
+        total.to_string().bright_yellow(),
+        "messages in this conversation".dimmed()
+    );
+    if skipped > 0 {
+        println!("   {}", format!("… {} earlier messages", skipped).dimmed());
+    }
+    println!();
+
+    for message in session.messages.iter().skip(skipped) {
+        let role_display = match message.role.to_string().as_str() {
+            "user" => "you".bright_green().bold(),
+            "assistant" => "ai ".bright_magenta().bold(),
+            "system" => "sys".bright_yellow().bold(),
+            other => other.white().bold(),
+        };
+        let preview: String = message
+            .content
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("")
+            .chars()
+            .take(140)
+            .collect();
+        let ellipsis = if message.content.chars().count() > preview.chars().count() {
+            "…"
+        } else {
+            ""
+        };
+        println!("  {} › {}{}", role_display, preview.dimmed(), ellipsis.dimmed());
+    }
+    println!();
 }
 
 /// Show preset suggestions based on context

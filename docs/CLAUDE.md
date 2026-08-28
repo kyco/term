@@ -150,7 +150,7 @@ TermAI follows a layered architecture with clear separation of concerns:
 6. **Input Processing**: User input processed and redacted for privacy
 7. **LLM Integration**: Provider called (Claude or OpenAI) via service layer
 8. **Response Processing**: Response formatted and displayed with enhanced UX
-9. **Persistence**: Sessions and messages persisted (if session specified)
+9. **Persistence**: The user's prompt is written before the provider call; the turn is stored when it completes. Only `--temporary` sessions skip this.
 
 ### Key Design Patterns
 - **Command Pattern**: Subcommand structure with dedicated handlers for each operation

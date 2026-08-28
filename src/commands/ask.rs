@@ -121,22 +121,36 @@ pub async fn handle_ask_command(args: &AskArgs, repo: &SqliteRepository) -> Resu
     println!("{}", "💭 Processing your question...".bright_yellow());
 
     // Get or create session if specified
-    let _session = if let Some(name) = session_name {
+    let mut session = if let Some(name) = session_name {
         println!("   📋 Saving to session: {}", name.bright_cyan());
         sessions_service::session(repo, repo, name)?
     } else {
         Session::new_temporary()
     };
 
+    // Continue the stored conversation instead of starting from scratch every
+    // time: `--session` promised continuity and only ever delivered a label.
+    let mut request_messages = session.messages.clone();
+    request_messages.extend(messages.iter().cloned());
+
+    // Record the new turns on the session with empty ids so they are picked up
+    // as unsaved, then write the question down before the request goes out.
+    for message in &messages {
+        session.add_raw_message(message.content.clone(), message.role.clone());
+    }
+    if let Err(e) = sessions_service::write_ahead_user_message(repo, repo, &mut session) {
+        eprintln!("{} {}", "⚠".yellow(), format!("Could not save your question: {}", e).yellow());
+    }
+
     // Route to appropriate LLM based on provider
     let response = match settings.default_provider {
-        SettingsProvider::Claude => call_claude_api(repo, messages, &selected_model)
+        SettingsProvider::Claude => call_claude_api(repo, request_messages, &selected_model)
             .await
             .context("Failed to get response from Claude API")?,
-        SettingsProvider::Openai => call_openai_api(repo, messages, &selected_model)
+        SettingsProvider::Openai => call_openai_api(repo, request_messages, &selected_model)
             .await
             .context("Failed to get response from OpenAI API")?,
-        SettingsProvider::Codex => call_codex_api(repo, messages, &selected_model)
+        SettingsProvider::Codex => call_codex_api(repo, request_messages, &selected_model)
             .await
             .context("Failed to get response from Codex API")?,
     };
@@ -150,15 +164,28 @@ pub async fn handle_ask_command(args: &AskArgs, repo: &SqliteRepository) -> Resu
 
     // Save to session if specified
     if let Some(name) = session_name {
+        session.add_raw_message(response.clone(), Role::Assistant);
+        sessions_service::persist_session(repo, repo, &mut session)
+            .context("Failed to save the conversation")?;
+
+        // Report what is actually stored, not what we hoped would be.
+        let stored = sessions_service::stored_message_count(repo, &session)?;
         println!();
-        println!(
-            "{}",
-            format!("💾 Conversation saved to session: {}", name).green()
-        );
-        println!(
-            "   {}",
-            format!("Continue with: termai chat --session {}", name).cyan()
-        );
+        if stored > 0 {
+            println!(
+                "{}",
+                format!("💾 Conversation saved to session: {} ({} messages)", name, stored).green()
+            );
+            println!(
+                "   {}",
+                format!("Continue with: termai chat --session {}", name).cyan()
+            );
+        } else {
+            println!(
+                "{}",
+                format!("⚠ Nothing reached the database — session '{}' was NOT saved.", name).red()
+            );
+        }
     }
 
     println!();

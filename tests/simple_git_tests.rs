@@ -1,4 +1,6 @@
-use assert_cmd::cargo::cargo_bin_cmd;
+#[macro_use]
+mod common;
+
 /// Simplified Git integration tests focusing on command functionality
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -17,7 +19,7 @@ fn test_git_commands_require_repo() {
     ];
 
     for args in test_cases {
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         for arg in args.iter() {
             cmd.arg(arg);
         }
@@ -39,7 +41,7 @@ fn test_git_command_help() {
     ];
 
     for args in help_commands {
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         for arg in args.iter() {
             cmd.arg(arg);
         }
@@ -70,7 +72,7 @@ fn test_git_command_validation() {
     ];
 
     for args in invalid_commands {
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         for arg in args.iter() {
             cmd.arg(arg);
         }
@@ -89,7 +91,7 @@ fn test_git_workflow_integration() {
     println!("Testing Git workflow integration in current repository...");
 
     // Test 1: Branch analysis should work
-    let mut cmd = cargo_bin_cmd!("termai");
+    let mut cmd = termai_cmd!();
     let output = cmd
         .arg("branch-summary")
         .output()
@@ -104,7 +106,7 @@ fn test_git_workflow_integration() {
     }
 
     // Test 2: Tag commands should provide feedback
-    let mut cmd = cargo_bin_cmd!("termai");
+    let mut cmd = termai_cmd!();
     let output = cmd
         .arg("tag")
         .arg("list")
@@ -120,7 +122,7 @@ fn test_git_workflow_integration() {
     }
 
     // Test 3: Rebase status should work
-    let mut cmd = cargo_bin_cmd!("termai");
+    let mut cmd = termai_cmd!();
     let output = cmd
         .arg("rebase")
         .arg("status")
@@ -136,7 +138,7 @@ fn test_git_workflow_integration() {
     }
 
     // Test 4: Conflict detection should work
-    let mut cmd = cargo_bin_cmd!("termai");
+    let mut cmd = termai_cmd!();
     let output = cmd
         .arg("conflicts")
         .arg("detect")
@@ -166,7 +168,7 @@ fn test_branch_naming_contexts() {
     ];
 
     for context in contexts {
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         let output = cmd
             .arg("branch-summary")
             .arg("--suggest-name")
@@ -193,7 +195,7 @@ fn test_branch_naming_contexts() {
 fn test_error_message_quality() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
 
-    let mut cmd = cargo_bin_cmd!("termai");
+    let mut cmd = termai_cmd!();
     let output = cmd
         .arg("tag")
         .arg("create")
@@ -220,7 +222,7 @@ fn test_error_message_quality() {
 #[test]
 fn test_command_discovery() {
     // Test that main help shows Git commands
-    let mut cmd = cargo_bin_cmd!("termai");
+    let mut cmd = termai_cmd!();
     cmd.arg("--help")
         .assert()
         .success()
@@ -238,7 +240,7 @@ fn test_command_performance() {
     let start = Instant::now();
 
     // Test a simple command that should be fast
-    let mut cmd = cargo_bin_cmd!("termai");
+    let mut cmd = termai_cmd!();
     cmd.arg("tag").arg("--help").assert().success();
 
     let duration = start.elapsed();

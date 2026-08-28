@@ -164,7 +164,8 @@ termai sessions --sort date list        # Sort by date (name|date|messages)
 termai sessions --filter api list       # Filter sessions by name pattern
 ```
 
-Note: `--limit`, `--sort`, `--filter`, and `--verbose` are options on `termai sessions` itself and go before the `list` subcommand.
+Note: `--limit`, `--sort` and `--filter` work either after `list` or, in the
+older form, before it (`termai sessions --limit 10 list`).
 
 #### Session Details
 ```bash

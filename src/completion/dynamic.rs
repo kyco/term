@@ -19,7 +19,7 @@ impl DynamicCompleter {
             "auth" => Self::complete_auth_command(&args[1..]),
             "session" => Self::complete_session_command(repo, &args[1..]),
             "config" => Self::complete_config_command(&args[1..]),
-            "ask" | "chat" => Self::complete_context_command(&args[1..]),
+            "ask" | "chat" => Self::complete_context_command(repo, &args[1..]),
             "completion" => Ok(CompletionValues::shell_types()),
             _ => Ok(Vec::new()),
         }
@@ -100,7 +100,7 @@ impl DynamicCompleter {
     }
 
     /// Complete context-related commands (ask, chat)
-    fn complete_context_command(args: &[String]) -> Result<Vec<String>> {
+    fn complete_context_command(repo: &SqliteRepository, args: &[String]) -> Result<Vec<String>> {
         if args.is_empty() {
             return Ok(vec![
                 "--directory".to_string(),
@@ -119,6 +119,11 @@ impl DynamicCompleter {
                 }
                 "--exclude" => Ok(CompletionValues::common_exclude_patterns()),
                 "--chunk-strategy" => Ok(CompletionValues::chunk_strategies()),
+                // Completing a session name is the whole point of `--session`;
+                // offering nothing is how typos become new empty sessions.
+                "--session" | "-s" | "--continue" | "--resume" => {
+                    CompletionValues::session_names(repo)
+                }
                 _ => Ok(Vec::new()),
             }
         } else {

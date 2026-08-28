@@ -1,5 +1,8 @@
 /// Comprehensive integration tests for Git functionality
 /// Tests all Git commands and their interactions with the repository
+#[macro_use]
+mod common;
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
@@ -9,7 +12,6 @@ use tempfile::TempDir;
 #[cfg(test)]
 mod git_integration_tests {
     use super::*;
-    use assert_cmd::cargo::cargo_bin_cmd;
 
     /// Test helper to create a temporary git repository
     fn setup_test_repo() -> Result<TempDir, Box<dyn std::error::Error>> {
@@ -219,7 +221,7 @@ mod tests {
             .success();
 
         // Test termai tag list command
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("tag")
             .arg("list")
             .current_dir(repo_path)
@@ -245,7 +247,7 @@ mod tests {
         create_test_commits(repo_path).expect("Failed to create test commits");
 
         // Test termai tag suggest command
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("tag")
             .arg("suggest")
             .current_dir(repo_path)
@@ -268,7 +270,7 @@ mod tests {
         create_test_commits(repo_path).expect("Failed to create test commits");
 
         // Test termai branch-summary command
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("branch-summary")
             .current_dir(repo_path)
             .assert()
@@ -289,7 +291,7 @@ mod tests {
         setup_rust_project(repo_path).expect("Failed to setup Rust project");
 
         // Test termai branch-summary --suggest-name
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("branch-summary")
             .arg("--suggest-name")
             .arg("--context")
@@ -313,7 +315,7 @@ mod tests {
         create_test_commits(repo_path).expect("Failed to create test commits");
 
         // Test termai rebase status command
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("rebase")
             .arg("status")
             .current_dir(repo_path)
@@ -335,7 +337,7 @@ mod tests {
         create_test_commits(repo_path).expect("Failed to create test commits");
 
         // Test termai rebase plan command
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("rebase")
             .arg("plan")
             .arg("--count")
@@ -360,7 +362,7 @@ mod tests {
         create_test_commits(repo_path).expect("Failed to create test commits");
 
         // Test termai rebase analyze command
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("rebase")
             .arg("analyze")
             .current_dir(repo_path)
@@ -380,7 +382,7 @@ mod tests {
         setup_rust_project(repo_path).expect("Failed to setup Rust project");
 
         // Test termai conflicts detect command (should show no conflicts)
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("conflicts")
             .arg("detect")
             .current_dir(repo_path)
@@ -401,7 +403,7 @@ mod tests {
         setup_rust_project(repo_path).expect("Failed to setup Rust project");
 
         // Test termai conflicts guide command
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("conflicts")
             .arg("guide")
             .current_dir(repo_path)
@@ -424,7 +426,7 @@ mod tests {
         setup_rust_project(repo_path).expect("Failed to setup Rust project");
 
         // Test termai conflicts status command
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("conflicts")
             .arg("status")
             .current_dir(repo_path)
@@ -440,7 +442,7 @@ mod tests {
         let temp_repo = setup_test_repo().expect("Failed to setup test repo");
         let repo_path = temp_repo.path();
 
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("stash")
             .arg("list")
             .current_dir(repo_path)
@@ -463,7 +465,7 @@ mod tests {
             .expect("Failed to modify README");
 
         // Push a real stash
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("stash")
             .arg("push")
             .arg("--message")
@@ -479,7 +481,7 @@ mod tests {
         assert_eq!(after_push, original, "stash push must restore working tree");
 
         // The real stash must show up in the list
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("stash")
             .arg("list")
             .current_dir(repo_path)
@@ -489,7 +491,7 @@ mod tests {
             .stdout(predicate::str::contains("WIP: stash e2e test"));
 
         // Pop must actually re-apply the changes and remove the stash
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("stash")
             .arg("pop")
             .current_dir(repo_path)
@@ -503,7 +505,7 @@ mod tests {
             "stash pop must restore stashed changes"
         );
 
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("stash")
             .arg("list")
             .current_dir(repo_path)
@@ -522,7 +524,7 @@ mod tests {
         create_test_commits(repo_path).expect("Failed to create test commits");
 
         // 1. Test branch analysis
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("branch-summary")
             .current_dir(repo_path)
             .assert()
@@ -530,7 +532,7 @@ mod tests {
             .stdout(predicate::str::contains("Branch Analysis"));
 
         // 2. Test branch naming suggestions
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("branch-summary")
             .arg("--suggest-name")
             .arg("--context")
@@ -541,7 +543,7 @@ mod tests {
             .stdout(predicate::str::contains("AI Branch Name Suggestions"));
 
         // 3. Test rebase planning
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("rebase")
             .arg("plan")
             .current_dir(repo_path)
@@ -550,7 +552,7 @@ mod tests {
             .stdout(predicate::str::contains("Rebase Plan Generation"));
 
         // 4. Test tag suggestion
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("tag")
             .arg("suggest")
             .current_dir(repo_path)
@@ -559,7 +561,7 @@ mod tests {
             .stdout(predicate::str::contains("Tag Suggestion"));
 
         // 5. Test conflict detection
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("conflicts")
             .arg("detect")
             .current_dir(repo_path)
@@ -574,7 +576,7 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
 
         // Test tag command outside git repo
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("tag")
             .arg("list")
             .current_dir(temp_dir.path())
@@ -586,7 +588,7 @@ mod tests {
             );
 
         // Test branch command outside git repo
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("branch-summary")
             .current_dir(temp_dir.path())
             .assert()
@@ -597,7 +599,7 @@ mod tests {
             );
 
         // Test rebase command outside git repo
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("rebase")
             .arg("status")
             .current_dir(temp_dir.path())
@@ -609,7 +611,7 @@ mod tests {
             );
 
         // Test conflicts command outside git repo
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("conflicts")
             .arg("detect")
             .current_dir(temp_dir.path())
@@ -629,7 +631,7 @@ mod tests {
         // Test Rust project detection
         setup_rust_project(repo_path).expect("Failed to setup Rust project");
 
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("branch-summary")
             .arg("--suggest-name")
             .current_dir(repo_path)
@@ -650,7 +652,7 @@ mod tests {
         )
         .expect("Failed to create package.json");
 
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("branch-summary")
             .arg("--suggest-name")
             .current_dir(repo_path)
@@ -668,7 +670,7 @@ mod tests {
         create_test_commits(repo_path).expect("Failed to create test commits");
 
         // Test rebase analyze command to check commit type detection
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("rebase")
             .arg("analyze")
             .current_dir(repo_path)
@@ -704,7 +706,7 @@ pub mod session;
             .success();
 
         // Test branch naming with auth context
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("branch-summary")
             .arg("--suggest-name")
             .arg("--context")
@@ -728,7 +730,7 @@ pub mod session;
         ];
 
         for cmd_args in commands {
-            let mut cmd = cargo_bin_cmd!("termai");
+            let mut cmd = termai_cmd!();
             for arg in cmd_args {
                 cmd.arg(arg);
             }

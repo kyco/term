@@ -47,6 +47,10 @@ pub struct ChatArgs {
     #[arg(short = 'c', long = "last", conflicts_with = "session")]
     pub last_session: bool,
 
+    /// Do not save this conversation (chats are saved by default)
+    #[arg(long, conflicts_with_all = ["session", "last_session"])]
+    pub temporary: bool,
+
     /// Enable smart context discovery (automatically finds relevant files)
     #[arg(long)]
     pub smart_context: bool,

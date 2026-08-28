@@ -35,7 +35,130 @@ use crate::session::service::sessions_service;
 use crate::ui::timer::ThinkingTimer;
 use crate::ui::web_indicator::activity;
 
-const HISTORY_FILE: &str = ".termai_history";
+/// Legacy per-directory history written by the bottom-anchored UI. Read for
+/// migration only; new history goes next to the database.
+const LEGACY_HISTORY_FILE: &str = ".termai_history";
+
+/// Input history belongs with the database, not in whichever directory the
+/// user happened to `cd` into. The per-directory file meant every project had
+/// a different history and none of it was where the user looked for it.
+fn history_path() -> Option<std::path::PathBuf> {
+    let dir = dirs::config_dir()?.join("termai");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("history"))
+}
+
+fn load_history_entries() -> Vec<String> {
+    let mut entries: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // The legacy CWD file first: it is the older half of the timeline.
+    let sources = [
+        std::fs::read_to_string(LEGACY_HISTORY_FILE).ok(),
+        history_path().and_then(|path| std::fs::read_to_string(path).ok()),
+    ];
+    for content in sources.into_iter().flatten() {
+        for line in content.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if seen.insert(line.to_string()) {
+                entries.push(line.to_string());
+            }
+        }
+    }
+    entries
+}
+
+fn save_history_entries(history: &[String]) {
+    if history.is_empty() {
+        return;
+    }
+    if let Some(path) = history_path() {
+        let _ = std::fs::write(path, history.join("\n") + "\n");
+    }
+}
+
+/// Names this tool generated because the user did not supply one.
+fn is_auto_name(name: &str) -> bool {
+    name == "temporary"
+        || name.starts_with("chat-")
+        || name.starts_with("chat_")
+        || name.starts_with("auto_save_")
+}
+
+/// Turn a prompt into a short, readable, greppable session-name fragment.
+fn slugify(prompt: &str) -> Option<String> {
+    let slug = prompt
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|word| !word.is_empty())
+        .take(6)
+        .collect::<Vec<_>>()
+        .join("-");
+
+    if slug.is_empty() {
+        None
+    } else {
+        Some(slug.chars().take(48).collect())
+    }
+}
+
+/// SIGHUP (the SSH session or terminal went away) and SIGTERM used to kill
+/// the process with the conversation still only in memory.
+#[cfg(unix)]
+struct Shutdown {
+    signals: Option<(
+        tokio::signal::unix::Signal,
+        tokio::signal::unix::Signal,
+    )>,
+}
+
+#[cfg(unix)]
+impl Shutdown {
+    fn new() -> Self {
+        use tokio::signal::unix::{signal, SignalKind};
+        let signals = match (signal(SignalKind::terminate()), signal(SignalKind::hangup())) {
+            (Ok(terminate), Ok(hangup)) => Some((terminate, hangup)),
+            _ => None,
+        };
+        Self { signals }
+    }
+
+    async fn recv(&mut self) {
+        match self.signals.as_mut() {
+            Some((terminate, hangup)) => {
+                tokio::select! {
+                    _ = terminate.recv() => {}
+                    _ = hangup.recv() => {}
+                }
+            }
+            None => std::future::pending::<()>().await,
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct Shutdown;
+
+#[cfg(not(unix))]
+impl Shutdown {
+    fn new() -> Self {
+        Self
+    }
+
+    async fn recv(&mut self) {
+        std::future::pending::<()>().await
+    }
+}
 
 /// RAII guard for raw mode + bracketed paste. Always restores the terminal
 /// on drop (including panics and error paths).
@@ -262,6 +385,9 @@ where
     context_files: Vec<Files>,
     should_exit: bool,
     chat_state: ChatState,
+    /// `termai chat "question"` — run as the first turn instead of being
+    /// announced and then dropped.
+    initial_input: Option<String>,
 }
 
 impl<'a, R, SR, MR> InteractiveSession<'a, R, SR, MR>
@@ -294,7 +420,14 @@ where
             context_files,
             should_exit: false,
             chat_state,
+            initial_input: None,
         })
+    }
+
+    /// Queue the message given on the command line as the opening turn.
+    pub fn with_initial_input(mut self, input: Option<String>) -> Self {
+        self.initial_input = input.filter(|text| !text.trim().is_empty());
+        self
     }
 
     /// Start the interactive chat session
@@ -320,6 +453,12 @@ where
         self.display_welcome();
         if !self.context_files.is_empty() {
             self.display_context_info();
+        }
+
+        if let Some(initial) = self.initial_input.take() {
+            if let Err(e) = self.process_input(&initial).await {
+                self.say(&self.formatter.format_error(&e.to_string()));
+            }
         }
 
         use std::io::BufRead;
@@ -372,17 +511,11 @@ where
 
         let guard = RawModeGuard::new()?;
         let shutdown = Arc::new(AtomicBool::new(false));
+
         let mut rx = spawn_input_reader(shutdown.clone());
         let mut ui = AnchorUi::new(guard, shutdown);
 
-        if let Ok(content) = std::fs::read_to_string(HISTORY_FILE) {
-            ui.editor.load_history(
-                content
-                    .lines()
-                    .filter(|l| !l.starts_with('#'))
-                    .map(String::from),
-            );
-        }
+        ui.editor.load_history(load_history_entries());
 
         activity::set_anchored(true);
         let result = self.anchored_loop(&mut ui, &mut rx).await;
@@ -391,12 +524,14 @@ where
         let history = ui.editor.history().to_vec();
         ui.close();
         drop(rx);
-        if !history.is_empty() {
-            let _ = std::fs::write(HISTORY_FILE, history.join("\n") + "\n");
-        }
+        save_history_entries(&history);
 
+        // Save first, then report the loop error. Propagating straight out of
+        // here used to skip the exit save entirely, so the run that failed was
+        // exactly the run whose conversation was thrown away.
+        let finished = self.finish().await;
         result?;
-        self.finish().await
+        finished
     }
 
     async fn anchored_loop(
@@ -404,6 +539,12 @@ where
         ui: &mut AnchorUi,
         rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
     ) -> Result<()> {
+        let mut shutdown = Shutdown::new();
+
+        if let Some(initial) = self.initial_input.take() {
+            self.process_submission(ui, rx, initial).await?;
+        }
+
         loop {
             if self.should_exit {
                 break;
@@ -412,8 +553,15 @@ where
             let status = self.status_info();
             ui.draw(&status, None)?;
 
-            let Some(event) = rx.recv().await else {
-                break;
+            let event = tokio::select! {
+                event = rx.recv() => match event {
+                    Some(event) => event,
+                    None => break,
+                },
+                _ = shutdown.recv() => {
+                    self.should_exit = true;
+                    break;
+                }
             };
 
             match event {
@@ -560,6 +708,24 @@ where
                 }
             }
         }
+
+        // Store the prompt before the request goes out. If the connection
+        // drops, the terminal closes or the process is killed between here
+        // and the response, the typed text is already on disk.
+        if let Err(e) = sessions_service::write_ahead_user_message(
+            self.session_repo,
+            self.message_repo,
+            &mut self.session,
+        ) {
+            let status = self.status_info();
+            ui.print_above(
+                &self
+                    .formatter
+                    .format_error(&format!("Could not save your message: {}", e)),
+                &status,
+            )?;
+        }
+
         self.session.redact(self.config_repo);
 
         // Snapshot status segments: the session is mutably borrowed by the
@@ -569,12 +735,16 @@ where
         let mut ticker = tokio::time::interval(Duration::from_millis(100));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+        let mut shutdown = Shutdown::new();
         let outcome = {
             let fut = Self::call_ai(self.config_repo, &self.chat_state, &mut self.session);
             tokio::pin!(fut);
             loop {
                 tokio::select! {
                     result = &mut fut => break TurnOutcome::Done(result),
+                    // The terminal went away mid-response. The prompt is
+                    // already on disk; leave promptly and save on the way out.
+                    _ = shutdown.recv() => break TurnOutcome::InputClosed,
                     _ = ticker.tick() => {
                         let _ = ui.draw(&status, Some(Self::spinner_info(started)));
                     }
@@ -613,6 +783,22 @@ where
 
         match outcome {
             TurnOutcome::Done(Ok(())) => {
+                // Restore the real text before anything is written. The
+                // redaction mapping is regenerated per run and never stored,
+                // so persisting the placeholder form would corrupt the
+                // conversation permanently and unrecoverably.
+                self.session.unredact();
+
+                // Store before painting. Rendering drops back to cooked mode,
+                // which re-arms Ctrl+C; a save that happened after the paint
+                // could lose an answer the user had already read.
+                sessions_service::persist_session(
+                    self.session_repo,
+                    self.message_repo,
+                    &mut self.session,
+                )?;
+                self.name_session_after_first_prompt();
+
                 // Paint the response into scrollback above the anchor.
                 ui.begin_suspended()?;
                 if let Some(last_message) = self.session.messages.last() {
@@ -631,47 +817,100 @@ where
                     }
                 }
                 ui.end_suspended();
-
-                sessions_service::session_add_messages(
-                    self.session_repo,
-                    self.message_repo,
-                    &self.session,
-                )?;
             }
             TurnOutcome::Done(Err(e)) => {
-                self.pop_trailing_user_message();
+                let unsent = self.take_trailing_user_message();
                 let status = self.status_info();
                 ui.print_above(
                     &self.formatter.format_error(&format!("AI Error: {}", e)),
                     &status,
                 )?;
+                self.offer_unsent_back(ui, unsent, &status)?;
             }
             TurnOutcome::Cancelled => {
                 // The request future was dropped above, aborting the HTTP
-                // call. Remove the un-answered user message.
-                self.pop_trailing_user_message();
+                // call. Take the un-answered user message back out of the
+                // conversation, but hand the text back to the editor.
+                let unsent = self.take_trailing_user_message();
                 let status = self.status_info();
                 ui.print_above("\x1b[2m  ✋ response cancelled\x1b[0m", &status)?;
+                self.offer_unsent_back(ui, unsent, &status)?;
             }
             TurnOutcome::InputClosed => {
                 self.should_exit = true;
             }
         }
 
+        // Failed and cancelled turns still hold redacted text.
         self.session.unredact();
         Ok(())
     }
 
-    fn pop_trailing_user_message(&mut self) {
-        if self
+    /// Remove an unanswered user turn from the conversation and return its
+    /// text. The matching row stays on disk marked pending, so the prompt
+    /// survives even if the process never gets to hand it back.
+    fn take_trailing_user_message(&mut self) -> Option<String> {
+        let is_trailing_user = self
             .session
             .messages
             .last()
             .map(|m| m.role == Role::User)
-            .unwrap_or(false)
-        {
-            self.session.messages.pop();
+            .unwrap_or(false);
+        if !is_trailing_user {
+            return None;
         }
+        self.session.messages.pop().map(|m| m.content)
+    }
+
+    /// Put a failed prompt back in the editor so a dropped connection costs
+    /// one keystroke rather than a retyped message.
+    fn offer_unsent_back(
+        &mut self,
+        ui: &mut AnchorUi,
+        unsent: Option<String>,
+        status: &StatusInfo,
+    ) -> Result<()> {
+        let Some(text) = unsent else {
+            return Ok(());
+        };
+        if ui.editor.buffer().trim().is_empty() {
+            ui.editor.set_text(&text);
+            ui.on_buffer_change();
+            ui.print_above(
+                "\x1b[2m  ↩ your message is back in the prompt — press Enter to resend\x1b[0m",
+                status,
+            )?;
+        } else {
+            ui.print_above(
+                "\x1b[2m  ↩ your message was saved — recover it with /unsent\x1b[0m",
+                status,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Give an auto-named session a name that says what it is about, once
+    /// there is a first prompt to derive one from.
+    fn name_session_after_first_prompt(&mut self) {
+        if !is_auto_name(&self.session.name) {
+            return;
+        }
+        let Some(first_prompt) = self
+            .session
+            .messages
+            .iter()
+            .find(|m| m.role == Role::User)
+            .map(|m| m.content.clone())
+        else {
+            return;
+        };
+        let Some(slug) = slugify(&first_prompt) else {
+            return;
+        };
+        let candidate = format!("{}-{}", Local::now().format("%Y%m%d"), slug);
+        // A collision just means the name stays as it is; never fail a turn
+        // over cosmetics.
+        let _ = sessions_service::rename_session(self.session_repo, &mut self.session, &candidate);
     }
 
     fn spinner_info(started: Instant) -> SpinnerInfo {
@@ -746,21 +985,22 @@ where
                 self.say(&palette_text);
             }
             ChatCommand::Save(name) => {
-                let session_name = name
-                    .unwrap_or_else(|| format!("chat_{}", Local::now().format("%Y%m%d_%H%M%S")));
-                self.session.name = session_name.clone();
-                sessions_service::session_add_messages(
-                    self.session_repo,
-                    self.message_repo,
-                    &self.session,
-                )?;
-                self.say(&self.formatter.format_session_saved(&session_name));
+                self.save_session_as(name)?;
+            }
+            ChatCommand::Sessions => {
+                self.display_recent_sessions();
+            }
+            ChatCommand::Unsent => {
+                self.display_unsent_messages();
             }
             ChatCommand::Context => {
                 self.display_context_info();
             }
             ChatCommand::Clear => {
                 self.session.messages.clear();
+                // Drafts left over from interrupted turns belong to the
+                // conversation the user just cleared.
+                sessions_service::clear_unsent_messages(self.message_repo, &self.session);
                 print!("\x1B[2J\x1B[1;1H"); // Clear screen, home cursor
                 std::io::stdout().flush().ok();
                 self.display_welcome();
@@ -946,6 +1186,19 @@ where
             }
         }
 
+        // Store the prompt before the request goes out (see anchored mode).
+        if let Err(e) = sessions_service::write_ahead_user_message(
+            self.session_repo,
+            self.message_repo,
+            &mut self.session,
+        ) {
+            self.say(
+                &self
+                    .formatter
+                    .format_error(&format!("Could not save your message: {}", e)),
+            );
+        }
+
         // Redact sensitive information
         self.session.redact(self.config_repo);
 
@@ -960,6 +1213,16 @@ where
 
         match result {
             Ok(_) => {
+                // Real text before storage (see anchored mode), and storage
+                // before rendering so a slow paint cannot lose the answer.
+                self.session.unredact();
+                sessions_service::persist_session(
+                    self.session_repo,
+                    self.message_repo,
+                    &mut self.session,
+                )?;
+                self.name_session_after_first_prompt();
+
                 // Display AI response with enhanced formatting
                 if let Some(last_message) = self.session.messages.last() {
                     if last_message.role == Role::Assistant {
@@ -982,19 +1245,17 @@ where
                         std::io::stdout().flush().unwrap();
                     }
                 }
-
-                // Save session automatically
-                sessions_service::session_add_messages(
-                    self.session_repo,
-                    self.message_repo,
-                    &self.session,
-                )?;
             }
             Err(e) => {
                 self.say(&self.formatter.format_error(&format!("AI Error: {}", e)));
 
-                // Remove the failed user message to keep session clean
-                self.pop_trailing_user_message();
+                // The prompt stays on disk as an unsent message; drop it from
+                // the live conversation so the next turn is not sent twice.
+                if self.take_trailing_user_message().is_some() {
+                    self.say(&self.formatter.format_warning(
+                        "Your message was saved — recover it with /unsent",
+                    ));
+                }
             }
         }
 
@@ -1152,25 +1413,129 @@ where
         self.say(&context_info);
     }
 
-    /// Save session when exiting
+    /// Final safety net on the way out. Every turn is already written as it
+    /// completes; this catches anything added since and tells the user, from
+    /// the database rather than from hope, where the conversation lives.
     async fn save_on_exit(&mut self) -> Result<()> {
-        // Auto-save session if it has messages and no name
-        if !self.session.messages.is_empty() && self.session.name == "temporary" {
-            let auto_name = format!("auto_save_{}", Local::now().format("%Y%m%d_%H%M%S"));
-            self.session.name = auto_name.clone();
-            sessions_service::session_add_messages(
-                self.session_repo,
-                self.message_repo,
-                &self.session,
-            )?;
-            self.say(
+        if self.session.messages.is_empty() {
+            // Opening a chat and closing it again should not leave a session
+            // behind for the user to wade through later.
+            sessions_service::discard_if_empty(self.session_repo, self.message_repo, &self.session);
+            return Ok(());
+        }
+
+        if self.session.temporary {
+            self.say(&self.formatter.format_warning(
+                "This was a --temporary chat, so nothing was saved. Use /save <name> next time to keep it.",
+            ));
+            return Ok(());
+        }
+
+        self.name_session_after_first_prompt();
+        sessions_service::persist_session(
+            self.session_repo,
+            self.message_repo,
+            &mut self.session,
+        )?;
+
+        match sessions_service::stored_message_count(self.message_repo, &self.session) {
+            Ok(stored) if stored > 0 => self.say(&self.formatter.format_success(&format!(
+                "Saved {} messages to '{}' — resume with: termai chat --session {}",
+                stored, self.session.name, self.session.name
+            ))),
+            Ok(_) => self.say(&self.formatter.format_error(
+                "Nothing reached the database — this conversation was NOT saved.",
+            )),
+            Err(e) => self.say(
                 &self
                     .formatter
-                    .format_success(&format!("Auto-saved session as '{}'", auto_name)),
-            );
+                    .format_error(&format!("Could not verify the save: {}", e)),
+            ),
         }
 
         Ok(())
+    }
+
+    /// `/save [name]`: name the conversation, then confirm from the database
+    /// that it is really there before claiming it was saved.
+    fn save_session_as(&mut self, name: Option<String>) -> Result<()> {
+        // `/save` on a `--temporary` chat is an explicit request to keep it.
+        let was_temporary = self.session.temporary;
+        self.session.temporary = false;
+
+        let target = name
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        if let Some(target) = target {
+            if let Err(e) =
+                sessions_service::rename_session(self.session_repo, &mut self.session, &target)
+            {
+                self.session.temporary = was_temporary;
+                self.say(&self.formatter.format_error(&e.to_string()));
+                return Ok(());
+            }
+        } else {
+            self.name_session_after_first_prompt();
+        }
+
+        sessions_service::persist_session(
+            self.session_repo,
+            self.message_repo,
+            &mut self.session,
+        )?;
+
+        let stored = sessions_service::stored_message_count(self.message_repo, &self.session)?;
+        if stored == 0 && !self.session.messages.is_empty() {
+            self.say(&self.formatter.format_error(
+                "Nothing was written to the database — this session was NOT saved.",
+            ));
+            return Ok(());
+        }
+
+        self.say(&self.formatter.format_session_saved(&self.session.name));
+        self.say(&self.formatter.format_success(&format!(
+            "{} messages stored — resume with: termai chat --session {}",
+            stored, self.session.name
+        )));
+        Ok(())
+    }
+
+    /// `/sessions`: the recent conversations, without leaving the chat.
+    fn display_recent_sessions(&self) {
+        if let Err(e) = sessions_service::fetch_sessions_with_options(
+            self.session_repo,
+            self.message_repo,
+            None,
+            Some(10),
+            &crate::args::SessionSortOrder::Date,
+        ) {
+            self.say(
+                &self
+                    .formatter
+                    .format_error(&format!("Could not list sessions: {}", e)),
+            );
+        }
+    }
+
+    /// `/unsent`: prompts that were stored but never answered.
+    fn display_unsent_messages(&self) {
+        let unsent = sessions_service::recover_unsent_messages(self.message_repo, &self.session);
+        if unsent.is_empty() {
+            self.say(
+                &self
+                    .formatter
+                    .format_success("No unsent messages — everything you typed got a reply."),
+            );
+            return;
+        }
+        self.say(&self.formatter.format_warning(&format!(
+            "{} message(s) never got a reply:",
+            unsent.len()
+        )));
+        for message in &unsent {
+            self.say(&format!("\n{}\n", message));
+        }
     }
 
     /// Handle the /branch command
@@ -1182,20 +1547,16 @@ where
             BranchService::generate_branch_name(&self.session.id, None)
         };
 
-        // Create branch from current session state
-        // Note: Need &mut SqliteRepository but we only have &SqliteRepository
-        // This is a limitation of the current design. For now, show what the command would do:
-        let message = if name.is_some() {
-            format!(
-                "🌿 Would create branch '{}' from current conversation state",
-                branch_name
-            )
-        } else {
-            format!(
-                "🌿 Would create auto-named branch '{}' from current conversation state",
-                branch_name
-            )
-        };
+        // Branching needs a &mut repository and this session only holds a
+        // shared one, so in-chat /branch cannot create anything. Say that
+        // plainly and point at the command that works, rather than printing a
+        // branch name the user will look for later and never find.
+        let _ = &branch_name;
+        let message = format!(
+            "🌿 /branch is not available inside chat yet.\n   Save this conversation, then run: termai sessions branch {}{}",
+            self.session.name,
+            name.map(|n| format!(" --name {}", n)).unwrap_or_default()
+        );
 
         // Display the branch creation message
         self.say(&self.formatter.format_success(&message));

@@ -20,14 +20,14 @@ where
         &self,
         id: &str,
         name: &str,
-        expires_at: NaiveDateTime,
+        last_used_at: NaiveDateTime,
         current: bool,
     ) -> Result<(), Self::Error>;
-    fn update_session(
+    fn upsert_session(
         &self,
         id: &str,
         name: &str,
-        expires_at: NaiveDateTime,
+        last_used_at: NaiveDateTime,
         current: bool,
     ) -> Result<(), Self::Error>;
     fn remove_current_from_all(&self) -> Result<(), Self::Error>;
@@ -45,4 +45,20 @@ where
         session_id: &str,
     ) -> Result<Vec<MessageEntity>, Self::Error>;
     fn add_message_to_session(&self, message: &MessageEntity) -> Result<(), Self::Error>;
+    fn count_messages_for_session(&self, session_id: &str) -> Result<i64, Self::Error>;
+    fn fetch_first_user_message(&self, session_id: &str) -> Result<Option<String>, Self::Error>;
+    fn promote_message(&self, message_id: &str) -> Result<(), Self::Error>;
+    fn fetch_pending_messages(&self, session_id: &str) -> Result<Vec<String>, Self::Error>;
+    fn discard_pending_messages(&self, session_id: &str) -> Result<(), Self::Error>;
+    fn search_messages(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<message_repository::MessageMatch>, Self::Error>;
+    fn fetch_conversation_rows(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<message_repository::StoredRow>, Self::Error>;
+    fn mark_duplicates(&self, ids: &[String]) -> Result<(), Self::Error>;
+    fn restore_duplicates(&self) -> Result<usize, Self::Error>;
 }

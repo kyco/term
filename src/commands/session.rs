@@ -17,15 +17,27 @@ pub fn handle_sessions_command(
     args: &SessionArgs,
 ) -> Result<()> {
     match action {
-        SessionAction::List => {
+        SessionAction::List {
+            filter,
+            limit,
+            sort,
+        } => {
+            // Flags given after `list` win; the pre-subcommand form is kept
+            // working because it is what the old help text documented.
             sessions_service::fetch_sessions_with_options(
                 repo,
                 repo,
-                args.filter.as_deref(),
-                args.limit,
-                &args.sort,
+                filter.as_deref().or(args.filter.as_deref()),
+                limit.or(args.limit),
+                sort.as_ref().unwrap_or(&args.sort),
             )?;
             Ok(())
+        }
+        SessionAction::Repair { apply, undo } => {
+            crate::session::service::repair_service::repair(repo, repo, repo, *apply, *undo)
+        }
+        SessionAction::Find { query, limit } => {
+            crate::session::service::sessions_service::search_sessions(repo, query, *limit)
         }
         SessionAction::Delete { name } => delete_session(repo, name),
         SessionAction::Show { name } => show_session_details(repo, name),
@@ -145,7 +157,7 @@ fn delete_session(repo: &SqliteRepository, session_name: &str) -> Result<()> {
                 "\n{}\n{}\n• Run '{}' to see available sessions\n• {}",
                 "💡 Session Troubleshooting:".bright_yellow().bold(),
                 "   The specified session could not be found.".white(),
-                "termai session list".cyan(),
+                "termai sessions list".cyan(),
                 "Check the session name spelling and try again".white()
             );
             anyhow::anyhow!("{}\n{}", e, guidance)
@@ -223,7 +235,7 @@ fn delete_session(repo: &SqliteRepository, session_name: &str) -> Result<()> {
     println!("{}", "💡 Next steps:".bright_yellow().bold());
     println!(
         "   {}         # View remaining sessions",
-        "termai session list".cyan()
+        "termai sessions list".cyan()
     );
     println!(
         "   {}       # Create a new session",
@@ -260,13 +272,17 @@ fn show_session_details(repo: &SqliteRepository, session_name: &str) -> Result<(
     println!("═══════════════════");
     println!("Name: {}", session.name);
     println!("ID: {}", session.id);
-    println!("Created: {}", session_entity.expires_at); // Using expires_at as a proxy for created time
+    println!("Last used: {}", session_entity.last_used_at);
     println!("Current: {}", if session.current { "Yes" } else { "No" });
-    println!(
-        "Temporary: {}",
-        if session.temporary { "Yes" } else { "No" }
-    );
     println!("Messages: {}", session.messages.len());
+
+    let unsent = repo.fetch_pending_messages(&session.id).unwrap_or_default();
+    if !unsent.is_empty() {
+        println!(
+            "Unsent: {} message(s) that never got a reply",
+            unsent.len()
+        );
+    }
 
     if !session.messages.is_empty() {
         println!("\n💬 Message History:");
@@ -480,7 +496,7 @@ fn handle_tree_command(
         println!(
             "{} {}",
             "🚀 Switch to branch:".bright_green(),
-            "termai session switch <session> <branch>".bright_cyan()
+            "termai sessions switch <session> <branch>".bright_cyan()
         );
     }
 
@@ -516,7 +532,7 @@ fn handle_branches_command(
         println!(
             "{} {}",
             "💡 Create a branch:".bright_yellow(),
-            format!("termai session branch {}", session_name).bright_cyan()
+            format!("termai sessions branch {}", session_name).bright_cyan()
         );
         return Ok(());
     }
@@ -608,12 +624,12 @@ fn handle_branches_command(
     println!(
         "   {} {}",
         "View tree:".bright_green(),
-        format!("termai session tree {}", session_name).bright_cyan()
+        format!("termai sessions tree {}", session_name).bright_cyan()
     );
     println!(
         "   {} {}",
         "Switch branch:".bright_green(),
-        format!("termai session switch {} <branch>", session_name).bright_cyan()
+        format!("termai sessions switch {} <branch>", session_name).bright_cyan()
     );
 
     Ok(())
@@ -895,12 +911,12 @@ fn handle_search_command(
     println!(
         "   {} {}",
         "Switch to branch:".bright_green(),
-        format!("termai session switch {} <branch>", session_name).bright_cyan()
+        format!("termai sessions switch {} <branch>", session_name).bright_cyan()
     );
     println!(
         "   {} {}",
         "View tree:".bright_green(),
-        format!("termai session tree {}", session_name).bright_cyan()
+        format!("termai sessions tree {}", session_name).bright_cyan()
     );
 
     Ok(())
@@ -1014,17 +1030,17 @@ fn handle_stats_command(repo: &SqliteRepository, session_name: &str, detailed: b
     println!(
         "   {} {}",
         "View tree:".cyan(),
-        format!("termai session tree {}", session_name).bright_cyan()
+        format!("termai sessions tree {}", session_name).bright_cyan()
     );
     println!(
         "   {} {}",
         "List branches:".cyan(),
-        format!("termai session branches {}", session_name).bright_cyan()
+        format!("termai sessions branches {}", session_name).bright_cyan()
     );
     println!(
         "   {} {}",
         "Create branch:".cyan(),
-        format!("termai session branch {}", session_name).bright_cyan()
+        format!("termai sessions branch {}", session_name).bright_cyan()
     );
 
     Ok(())
@@ -1054,13 +1070,13 @@ fn handle_compare_command(
         println!(
             "   {} {}",
             "Compare branches:".cyan(),
-            format!("termai session compare {} branch1 branch2", session_name).bright_cyan()
+            format!("termai sessions compare {} branch1 branch2", session_name).bright_cyan()
         );
         println!(
             "   {} {}",
             "Side-by-side view:".cyan(),
             format!(
-                "termai session compare {} branch1 branch2 --side-by-side",
+                "termai sessions compare {} branch1 branch2 --side-by-side",
                 session_name
             )
             .bright_cyan()
@@ -1199,7 +1215,7 @@ fn handle_compare_command(
     println!(
         "   {} {}",
         "Tree view:".cyan(),
-        format!("termai session tree {}", session_name).bright_cyan()
+        format!("termai sessions tree {}", session_name).bright_cyan()
     );
 
     if !side_by_side {
@@ -1207,7 +1223,7 @@ fn handle_compare_command(
             "   {} {}",
             "Side-by-side:".cyan(),
             format!(
-                "termai session compare {} {} --side-by-side",
+                "termai sessions compare {} {} --side-by-side",
                 session_name,
                 branch_names.join(" ")
             )
@@ -1220,7 +1236,7 @@ fn handle_compare_command(
             "   {} {}",
             "Quick outcomes:".cyan(),
             format!(
-                "termai session compare {} {} --outcomes-only",
+                "termai sessions compare {} {} --outcomes-only",
                 session_name,
                 branch_names.join(" ")
             )
@@ -1313,7 +1329,7 @@ fn handle_merge_command(
     println!(
         "   {} {}",
         "Switch to target:".cyan(),
-        format!("termai session switch {} {}", session_name, target_branch).bright_cyan()
+        format!("termai sessions switch {} {}", session_name, target_branch).bright_cyan()
     );
 
     Ok(())

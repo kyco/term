@@ -24,6 +24,7 @@ mod tests {
     pub struct MockRepository {
         configs: Arc<Mutex<HashMap<String, ConfigEntity>>>,
         sessions: Arc<Mutex<HashMap<String, SessionEntity>>>,
+        messages: Arc<Mutex<Vec<crate::session::entity::message_entity::MessageEntity>>>,
         next_id: Arc<Mutex<i64>>,
     }
 
@@ -33,6 +34,7 @@ mod tests {
             Self {
                 configs: Arc::new(Mutex::new(HashMap::new())),
                 sessions: Arc::new(Mutex::new(HashMap::new())),
+                messages: Arc::new(Mutex::new(Vec::new())),
                 next_id: Arc::new(Mutex::new(1)),
             }
         }
@@ -103,33 +105,28 @@ mod tests {
             &self,
             id: &str,
             name: &str,
-            expires_at: NaiveDateTime,
+            last_used_at: NaiveDateTime,
             current: bool,
         ) -> Result<(), Self::Error> {
-            let mut sessions = self.sessions.lock().unwrap();
-            let entity = SessionEntity::new(
-                id.to_string(),
-                name.to_string(),
-                expires_at,
-                if current { 1 } else { 0 },
-            );
-            sessions.insert(name.to_string(), entity);
-            Ok(())
+            self.upsert_session(id, name, last_used_at, current)
         }
 
-        fn update_session(
+        fn upsert_session(
             &self,
             id: &str,
             name: &str,
-            expires_at: NaiveDateTime,
+            last_used_at: NaiveDateTime,
             current: bool,
         ) -> Result<(), Self::Error> {
             let mut sessions = self.sessions.lock().unwrap();
+            // Keyed by id so a rename does not leave the old name behind.
+            sessions.retain(|_, session| session.id != id);
             let entity = SessionEntity::new(
                 id.to_string(),
                 name.to_string(),
-                expires_at,
+                last_used_at + chrono::Duration::hours(24),
                 if current { 1 } else { 0 },
+                last_used_at,
             );
             sessions.insert(name.to_string(), entity);
             Ok(())
@@ -155,18 +152,139 @@ mod tests {
 
         fn fetch_messages_for_session(
             &self,
-            _session_id: &str,
+            session_id: &str,
         ) -> Result<Vec<crate::session::entity::message_entity::MessageEntity>, Self::Error>
         {
-            // For testing purposes, return empty messages
-            Ok(vec![])
+            let messages = self.messages.lock().unwrap();
+            Ok(messages
+                .iter()
+                .filter(|m| m.session_id == session_id && m.message_type != "pending")
+                .cloned()
+                .collect())
         }
 
         fn add_message_to_session(
             &self,
-            _message: &crate::session::entity::message_entity::MessageEntity,
+            message: &crate::session::entity::message_entity::MessageEntity,
         ) -> Result<(), Self::Error> {
+            let mut messages = self.messages.lock().unwrap();
+            messages.push(message.clone());
             Ok(())
+        }
+
+        fn count_messages_for_session(&self, session_id: &str) -> Result<i64, Self::Error> {
+            let messages = self.messages.lock().unwrap();
+            Ok(messages
+                .iter()
+                .filter(|m| m.session_id == session_id && m.message_type != "pending")
+                .count() as i64)
+        }
+
+        fn fetch_first_user_message(
+            &self,
+            session_id: &str,
+        ) -> Result<Option<String>, Self::Error> {
+            let messages = self.messages.lock().unwrap();
+            Ok(messages
+                .iter()
+                .find(|m| {
+                    m.session_id == session_id && m.role == "user" && m.message_type != "pending"
+                })
+                .map(|m| m.content.clone()))
+        }
+
+        fn promote_message(&self, message_id: &str) -> Result<(), Self::Error> {
+            let mut messages = self.messages.lock().unwrap();
+            for message in messages.iter_mut() {
+                if message.id == message_id && message.message_type == "pending" {
+                    message.message_type = "standard".to_string();
+                }
+            }
+            Ok(())
+        }
+
+        fn fetch_pending_messages(&self, session_id: &str) -> Result<Vec<String>, Self::Error> {
+            let messages = self.messages.lock().unwrap();
+            Ok(messages
+                .iter()
+                .filter(|m| m.session_id == session_id && m.message_type == "pending")
+                .map(|m| m.content.clone())
+                .collect())
+        }
+
+        fn discard_pending_messages(&self, session_id: &str) -> Result<(), Self::Error> {
+            let mut messages = self.messages.lock().unwrap();
+            messages.retain(|m| !(m.session_id == session_id && m.message_type == "pending"));
+            Ok(())
+        }
+
+        fn fetch_conversation_rows(
+            &self,
+            session_id: &str,
+        ) -> Result<Vec<crate::session::repository::message_repository::StoredRow>, Self::Error>
+        {
+            let messages = self.messages.lock().unwrap();
+            Ok(messages
+                .iter()
+                .filter(|m| m.session_id == session_id && m.message_type != "pending")
+                .map(|m| crate::session::repository::message_repository::StoredRow {
+                    id: m.id.clone(),
+                    role: m.role.clone(),
+                    content: m.content.clone(),
+                    message_type: m.message_type.clone(),
+                })
+                .collect())
+        }
+
+        fn mark_duplicates(&self, ids: &[String]) -> Result<(), Self::Error> {
+            let mut messages = self.messages.lock().unwrap();
+            for message in messages.iter_mut() {
+                if ids.contains(&message.id) {
+                    message.message_type = "duplicate".to_string();
+                }
+            }
+            Ok(())
+        }
+
+        fn restore_duplicates(&self) -> Result<usize, Self::Error> {
+            let mut messages = self.messages.lock().unwrap();
+            let mut restored = 0;
+            for message in messages.iter_mut() {
+                if message.message_type == "duplicate" {
+                    message.message_type = "standard".to_string();
+                    restored += 1;
+                }
+            }
+            Ok(restored)
+        }
+
+        fn search_messages(
+            &self,
+            query: &str,
+            limit: usize,
+        ) -> Result<
+            Vec<crate::session::repository::message_repository::MessageMatch>,
+            Self::Error,
+        > {
+            let sessions = self.sessions.lock().unwrap();
+            let messages = self.messages.lock().unwrap();
+            Ok(messages
+                .iter()
+                .filter(|m| m.content.contains(query) && m.message_type != "pending")
+                .take(limit)
+                .map(|m| {
+                    let session_name = sessions
+                        .values()
+                        .find(|s| s.id == m.session_id)
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
+                    crate::session::repository::message_repository::MessageMatch {
+                        session_name,
+                        role: m.role.clone(),
+                        content: m.content.clone(),
+                    }
+                })
+                .collect())
         }
     }
 
@@ -229,6 +347,7 @@ mod tests {
 
         // Test ChatArgs
         let chat_args = ChatArgs {
+            temporary: false,
             input: Some("Hello".to_string()),
             directory: Some("src/".to_string()),
             directories: vec!["tests/".to_string()],
@@ -431,9 +550,13 @@ mod tests {
 
     #[test]
     fn test_session_action_enum() {
-        let list_action = SessionAction::List;
+        let list_action = SessionAction::List {
+            filter: None,
+            limit: None,
+            sort: None,
+        };
         match list_action {
-            SessionAction::List => (),
+            SessionAction::List { .. } => (),
             _ => panic!("Expected List action"),
         }
 

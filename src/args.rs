@@ -289,7 +289,34 @@ pub enum RedactAction {
 #[derive(Subcommand, Debug, Clone)]
 pub enum SessionAction {
     /// List all sessions
-    List,
+    List {
+        /// Filter by session name or opening message
+        #[arg(long)]
+        filter: Option<String>,
+        /// Limit the number of sessions shown
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Sort by: name, date, messages
+        #[arg(long, value_enum)]
+        sort: Option<SessionSortOrder>,
+    },
+    /// Find and undo duplicated messages left by older versions
+    Repair {
+        /// Apply the repair (default is a preview)
+        #[arg(long)]
+        apply: bool,
+        /// Put previously repaired messages back
+        #[arg(long, conflicts_with = "apply")]
+        undo: bool,
+    },
+    /// Find sessions by what was said in them
+    Find {
+        /// Text to look for in message content
+        query: String,
+        /// Maximum number of matches to show
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
     /// Delete a specific session
     Delete {
         /// Name of the session to delete
@@ -556,7 +583,7 @@ impl Args {
         matches!(
             self.command,
             Some(Commands::Sessions {
-                action: SessionAction::List,
+                action: SessionAction::List { .. },
                 ..
             })
         ) || self.sessions_all

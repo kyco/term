@@ -1,3 +1,6 @@
+#[macro_use]
+mod common;
+
 use predicates::prelude::*;
 use std::fs;
 use tempfile::TempDir;
@@ -10,7 +13,6 @@ use tempfile::TempDir;
 #[cfg(test)]
 mod cli_integration_tests {
     use super::*;
-    use assert_cmd::cargo::cargo_bin_cmd;
 
     #[test]
     fn test_smart_context_flag_with_rust_project() {
@@ -62,7 +64,7 @@ mod tests {
         .unwrap();
 
         // Test the CLI with --smart-context flag
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("--smart-context")
             .arg("Explain the main function")
             .arg(path.to_str().unwrap());
@@ -95,7 +97,7 @@ mod tests {
         fs::create_dir_all(path.join("src")).unwrap();
         fs::write(path.join("src/main.rs"), "fn main() {}").unwrap();
 
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("--smart-context")
             .arg("--preview-context")
             .arg("Test query")
@@ -118,7 +120,7 @@ mod tests {
         fs::write(path.join("package.json"), r#"{"name": "test"}"#).unwrap();
         fs::write(path.join("index.js"), "console.log('hello');").unwrap();
 
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("--smart-context")
             .arg("--max-context-tokens")
             .arg("2000")
@@ -142,7 +144,7 @@ mod tests {
         fs::write(path.join("main.py"), "print('hello')").unwrap();
         fs::write(path.join("requirements.txt"), "requests==2.28.0").unwrap();
 
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("--smart-context")
             .arg("--session")
             .arg("test-session")
@@ -180,7 +182,7 @@ type = "rust"
         )
         .unwrap();
 
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("--smart-context")
             .arg("Add error handling")
             .arg(path.to_str().unwrap());
@@ -195,7 +197,7 @@ type = "rust"
 
     #[test]
     fn test_smart_context_help() {
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("--help");
 
         cmd.assert()
@@ -208,7 +210,6 @@ type = "rust"
 #[cfg(test)]
 mod configuration_tests {
     use super::*;
-    use assert_cmd::cargo::cargo_bin_cmd;
 
     #[test]
     fn test_termai_config_file_validation() {
@@ -237,7 +238,7 @@ entry_points = ["src/main.rs"]
         fs::create_dir_all(path.join("src")).unwrap();
         fs::write(path.join("src/main.rs"), "fn main() {}").unwrap();
 
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("--smart-context")
             .arg("Test query")
             .arg(path.to_str().unwrap());
@@ -260,7 +261,7 @@ entry_points = ["src/main.rs"]
         fs::create_dir_all(path.join("src")).unwrap();
         fs::write(path.join("src/main.rs"), "fn main() {}").unwrap();
 
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("--smart-context")
             .arg("Test query")
             .arg(path.to_str().unwrap());
@@ -293,7 +294,6 @@ entry_points = ["src/main.rs"]
 #[cfg(test)]
 mod project_type_detection_cli_tests {
     use super::*;
-    use assert_cmd::cargo::cargo_bin_cmd;
 
     fn create_project_and_test_cli(project_files: &[(&str, &str)], expected_to_work: bool) {
         let temp_dir = TempDir::new().unwrap();
@@ -308,7 +308,7 @@ mod project_type_detection_cli_tests {
             fs::write(path.join(file_path), content).unwrap();
         }
 
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("--smart-context")
             .arg("Explain the project structure")
             .arg(path.to_str().unwrap());
@@ -435,7 +435,6 @@ mod project_type_detection_cli_tests {
 #[cfg(test)]
 mod chunking_integration_tests {
     use super::*;
-    use assert_cmd::cargo::cargo_bin_cmd;
 
     #[test]
     fn test_chunking_with_large_project() {
@@ -526,7 +525,7 @@ fn main() {
         .unwrap();
 
         // Test with low token limit to force chunking
-        let mut cmd = cargo_bin_cmd!("termai");
+        let mut cmd = termai_cmd!();
         cmd.arg("--smart-context")
             .arg("--max-context-tokens")
             .arg("1000") // Very low limit to force chunking

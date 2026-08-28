@@ -218,7 +218,7 @@ fn print_completion_instructions(shell: &str, config_file: &str, command: &str) 
     println!("   {}", "termai <TAB><TAB>".cyan());
     println!("   {}", "termai config <TAB><TAB>".cyan());
     println!("   {}", "termai auth <TAB><TAB>".cyan());
-    println!("   {}", "termai session <TAB><TAB>".cyan());
+    println!("   {}", "termai sessions <TAB><TAB>".cyan());
 }
 
 /// Print enhanced completion installation instructions
@@ -300,7 +300,7 @@ fn print_enhanced_completion_instructions(shell: &str) {
     );
     println!(
         "   • {} - Tab complete with your actual session names",
-        "termai session delete <TAB>".bright_white()
+        "termai sessions delete <TAB>".bright_white()
     );
     println!(
         "   • {} - Complete provider names",

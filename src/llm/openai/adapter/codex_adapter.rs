@@ -6,8 +6,8 @@
 use crate::llm::openai::model::codex_api::{
     CodexContentItem, CodexOutput, CodexRequest, CodexResponse,
 };
+use crate::llm::common::http;
 use anyhow::{anyhow, Result};
-use reqwest::Client;
 
 /// The Codex API endpoint
 const CODEX_API_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
@@ -21,7 +21,7 @@ impl CodexAdapter {
     /// Uses OAuth access token for authentication instead of API key.
     /// The Codex API requires streaming, so we parse SSE events and extract the final response.
     pub async fn chat(request: &CodexRequest, access_token: &str) -> Result<CodexResponse> {
-        let client = Client::builder().build()?;
+        let client = http::client()?;
 
         let response = client
             .post(CODEX_API_ENDPOINT)
@@ -51,9 +51,33 @@ impl CodexAdapter {
             ));
         }
 
-        // Parse SSE streaming response
-        let response_text = response.text().await?;
-        Self::parse_sse_response(&response_text)
+        // Read the stream incrementally. `.text()` buffers the whole body and
+        // fails as a unit, so a reset near the end of a long answer used to
+        // throw away every byte that had already arrived.
+        let mut response = response;
+        let mut body = String::new();
+        let mut stream_error: Option<reqwest::Error> = None;
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => body.push_str(&String::from_utf8_lossy(&chunk)),
+                Ok(None) => break,
+                Err(error) => {
+                    stream_error = Some(error);
+                    break;
+                }
+            }
+        }
+
+        match Self::parse_sse_response(&body) {
+            Ok(parsed) => Ok(parsed),
+            Err(parse_error) => match stream_error {
+                Some(error) => Err(anyhow!(
+                    "The connection dropped mid-response and nothing usable had arrived: {}",
+                    error
+                )),
+                None => Err(parse_error),
+            },
+        }
     }
 
     /// Parse SSE (Server-Sent Events) response and extract the final CodexResponse
@@ -177,12 +201,34 @@ impl CodexAdapter {
             }
         }
 
-        let mut response = final_response.ok_or_else(|| {
-            anyhow!(
-                "No valid response found in SSE stream. Raw response:\n{}",
-                sse_text.chars().take(1000).collect::<String>()
-            )
-        })?;
+        // A stream cut short never carries `response.completed`. If any answer
+        // text arrived, keep it rather than discarding the whole turn.
+        let mut response = match final_response {
+            Some(response) => response,
+            None => {
+                let salvaged = output_text_done
+                    .clone()
+                    .filter(|text| !text.is_empty())
+                    .or_else(|| (!accumulated_text.is_empty()).then(|| accumulated_text.clone()));
+                match salvaged {
+                    Some(_) => CodexResponse {
+                        id: "resp_truncated".to_string(),
+                        object: "response".to_string(),
+                        model: String::new(),
+                        status: "incomplete".to_string(),
+                        error: None,
+                        output: Vec::new(),
+                        usage: None,
+                    },
+                    None => {
+                        return Err(anyhow!(
+                            "No valid response found in SSE stream. Raw response:\n{}",
+                            sse_text.chars().take(1000).collect::<String>()
+                        ))
+                    }
+                }
+            }
+        };
 
         if response.output.is_empty() {
             let synthesized_text = output_text_done

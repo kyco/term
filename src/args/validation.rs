@@ -487,6 +487,7 @@ mod tests {
     fn test_chunked_analysis_without_smart_context() {
         let args = Args {
             command: Some(Commands::Chat(ChatArgs {
+                temporary: false,
                 input: None,
                 directory: None,
                 directories: vec![],
@@ -517,6 +518,7 @@ mod tests {
     fn test_conflicting_directory_args() {
         let args = Args {
             command: Some(Commands::Chat(ChatArgs {
+                temporary: false,
                 input: None,
                 directory: Some("src/".to_string()),
                 directories: vec!["tests/".to_string()],
@@ -547,6 +549,7 @@ mod tests {
     fn test_invalid_chunk_strategy() {
         let args = Args {
             command: Some(Commands::Chat(ChatArgs {
+                temporary: false,
                 input: None,
                 directory: None,
                 directories: vec![],

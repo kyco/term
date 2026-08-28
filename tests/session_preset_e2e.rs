@@ -88,13 +88,11 @@ impl TestHome {
 #[test]
 fn sessions_list_on_fresh_home_shows_no_sessions() {
     let home = TestHome::new();
-    // There is no dedicated empty-state message; an empty list simply prints
-    // no `session:` entries.
     home.cmd()
         .args(["sessions", "list"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("session: ").not());
+        .stdout(predicate::str::contains("No sessions yet"));
 }
 
 #[test]
@@ -117,9 +115,12 @@ fn sessions_list_shows_seeded_sessions() {
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("session: alpha")
-                .and(predicate::str::contains("session: expired-session"))
-                .and(predicate::str::contains("message: 2")),
+            predicate::str::contains("alpha")
+                .and(predicate::str::contains("expired-session"))
+                // The listing shows the opening prompt so a session is
+                // recognisable without opening it.
+                .and(predicate::str::contains("Hello world question"))
+                .and(predicate::str::contains("Resume:")),
         );
 }
 
@@ -136,9 +137,9 @@ fn sessions_list_limit_caps_rows() {
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("session: alpha")
-                .and(predicate::str::contains("session: beta"))
-                .and(predicate::str::contains("session: gamma").not()),
+            predicate::str::contains("alpha")
+                .and(predicate::str::contains("beta"))
+                .and(predicate::str::contains("gamma").not()),
         );
 }
 
@@ -157,9 +158,9 @@ fn sessions_list_sort_orders_rows() {
         .assert()
         .success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
-    let alpha = stdout.find("session: alpha").expect("alpha listed");
-    let beta = stdout.find("session: beta").expect("beta listed");
-    let gamma = stdout.find("session: gamma").expect("gamma listed");
+    let alpha = stdout.find("alpha").expect("alpha listed");
+    let beta = stdout.find("beta").expect("beta listed");
+    let gamma = stdout.find("gamma").expect("gamma listed");
     assert!(
         alpha < beta && beta < gamma,
         "--sort name must list alphabetically, got:\n{stdout}"
@@ -172,9 +173,9 @@ fn sessions_list_sort_orders_rows() {
         .assert()
         .success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
-    let alpha = stdout.find("session: alpha").expect("alpha listed");
-    let beta = stdout.find("session: beta").expect("beta listed");
-    let gamma = stdout.find("session: gamma").expect("gamma listed");
+    let alpha = stdout.find("alpha").expect("alpha listed");
+    let beta = stdout.find("beta").expect("beta listed");
+    let gamma = stdout.find("gamma").expect("gamma listed");
     assert!(
         beta < alpha && alpha < gamma,
         "--sort date must list most recent first, got:\n{stdout}"
@@ -193,9 +194,9 @@ fn sessions_list_filter_matches_name_substring() {
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("session: project-alpha")
-                .and(predicate::str::contains("session: project-beta"))
-                .and(predicate::str::contains("session: scratch").not()),
+            predicate::str::contains("project-alpha")
+                .and(predicate::str::contains("project-beta"))
+                .and(predicate::str::contains("scratch").not()),
         );
 
     home.cmd()
@@ -203,10 +204,91 @@ fn sessions_list_filter_matches_name_substring() {
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("session: project-beta")
-                .and(predicate::str::contains("session: project-alpha").not())
-                .and(predicate::str::contains("session: scratch").not()),
+            predicate::str::contains("project-beta")
+                .and(predicate::str::contains("project-alpha").not())
+                .and(predicate::str::contains("scratch").not()),
         );
+}
+
+#[test]
+fn sessions_find_searches_message_content() {
+    let home = TestHome::new();
+    home.seed_default_session("sess-alpha", "alpha");
+    home.seed_session("sess-b", "beta", "2099-01-02 00:00:00", false);
+    home.seed_message("sess-b-m1", "sess-b", "user", "how do I configure flyway");
+
+    // The name says nothing about the content; the search has to read the
+    // messages.
+    home.cmd()
+        .args(["sessions", "find", "flyway"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("beta")
+                .and(predicate::str::contains("configure flyway"))
+                .and(predicate::str::contains("alpha").not()),
+        );
+
+    home.cmd()
+        .args(["sessions", "find", "nothing-mentions-this"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No conversation mentions"));
+}
+
+#[test]
+fn sessions_repair_previews_then_removes_duplicates() {
+    let home = TestHome::new();
+    home.seed_session("sess-a", "duped", "2099-01-01 00:00:00", true);
+    // The shape older versions produced: turn 1 stored, then turn 2 re-storing
+    // turn 1 alongside it.
+    home.seed_message("m1", "sess-a", "user", "q1");
+    home.seed_message("m2", "sess-a", "assistant", "a1");
+    home.seed_message("m3", "sess-a", "user", "q1");
+    home.seed_message("m4", "sess-a", "assistant", "a1");
+    home.seed_message("m5", "sess-a", "user", "q2");
+    home.seed_message("m6", "sess-a", "assistant", "a2");
+
+    // A preview changes nothing.
+    home.cmd()
+        .args(["sessions", "repair"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Nothing changed"));
+    assert_eq!(home.count("SELECT COUNT(*) FROM messages"), 6);
+
+    home.cmd()
+        .args(["sessions", "repair", "--apply"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("removed from their conversations"));
+
+    // Nothing is deleted, and the conversation reads correctly again.
+    assert_eq!(home.count("SELECT COUNT(*) FROM messages"), 6);
+    assert_eq!(
+        home.count("SELECT COUNT(*) FROM messages WHERE message_type = 'duplicate'"),
+        2
+    );
+    home.cmd()
+        .args(["sessions", "show", "duped"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Messages: 4"));
+
+    // Re-running finds nothing left to do, and --undo puts them back.
+    home.cmd()
+        .args(["sessions", "repair"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No duplicated messages found"));
+    home.cmd()
+        .args(["sessions", "repair", "--undo"])
+        .assert()
+        .success();
+    assert_eq!(
+        home.count("SELECT COUNT(*) FROM messages WHERE message_type = 'duplicate'"),
+        0
+    );
 }
 
 #[test]

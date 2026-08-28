@@ -10,6 +10,10 @@ pub enum ChatCommand {
 
     // Session management
     Save(Option<String>),
+    /// List recent sessions without leaving the chat.
+    Sessions,
+    /// Show prompts that were stored but never answered.
+    Unsent,
     Clear,
     Retry,
     Branch(Option<String>),
@@ -112,6 +116,8 @@ impl ChatCommand {
                 };
                 Some(ChatCommand::Save(name))
             }
+            "sessions" | "ls" => Some(ChatCommand::Sessions),
+            "unsent" => Some(ChatCommand::Unsent),
             "clear" | "c" => Some(ChatCommand::Clear),
             "retry" | "r" => Some(ChatCommand::Retry),
             "branch" | "b" => {
@@ -211,6 +217,8 @@ impl ChatCommand {
             ChatCommand::Commands => "Open command palette with all commands",
             ChatCommand::Exit | ChatCommand::Quit => "Exit chat mode",
             ChatCommand::Save(_) => "Save current session with optional name",
+            ChatCommand::Sessions => "List recent sessions",
+            ChatCommand::Unsent => "Show messages that never got a reply",
             ChatCommand::Clear => "Clear conversation history",
             ChatCommand::Retry => "Regenerate the last AI response",
             ChatCommand::Branch(_) => "Create a new conversation branch",
@@ -255,6 +263,18 @@ impl ChatCommand {
                 command: "/save [name]",
                 aliases: "/s",
                 description: "Save session with optional name",
+                category: CommandCategory::Session,
+            },
+            CommandEntry {
+                command: "/sessions",
+                aliases: "/ls",
+                description: "List recent sessions",
+                category: CommandCategory::Session,
+            },
+            CommandEntry {
+                command: "/unsent",
+                aliases: "",
+                description: "Show messages that never got a reply",
                 category: CommandCategory::Session,
             },
             CommandEntry {

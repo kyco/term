@@ -347,7 +347,7 @@ impl HelpSystem {
         println!("   • Current/temporary status");
         println!();
         println!("{}", "TIPS:".bright_green().bold());
-        println!("   • Sessions expire after 7 days of inactivity");
+        println!("   • Sessions are kept until you delete them — nothing expires");
         println!("   • Use descriptive names for better organization");
         println!("   • Show command displays full message history");
         println!("   • Deleted sessions cannot be recovered");

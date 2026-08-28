@@ -18,8 +18,19 @@ cargo build --release
 termai setup                     # Interactive setup wizard
 termai auth login claude         # Or: openai, codex (ChatGPT OAuth)
 termai ask "Explain this code" ./src/main.rs
-termai chat                      # Interactive chat session
+termai chat                      # Interactive chat session (saved automatically)
+termai sessions list             # Find a past conversation
+termai sessions find "flyway"    # ...or search what was said in one
 ```
+
+Chats are saved as you go: each turn is written when it completes, and your
+prompt is stored *before* the request goes out, so a dropped connection costs
+you nothing. Use `termai chat --temporary` for a conversation you do not want
+kept.
+
+Upgrading from an earlier version? Run `termai sessions repair` — older
+versions re-inserted the whole conversation on every turn, and it will show
+you (and, with `--apply`, clean up) the duplicates.
 
 ## Documentation
 
